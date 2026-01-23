@@ -1,0 +1,73 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: upstash-redis-local
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod download
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        format: zip
+
+brews:
+  - repository:
+      owner: DarthBenro008
+      name: homebrew-upstash-redis-local
+    description: "upstash-redis-local - Test @upstash/redis locally!"
+    directory: Formula
+    homepage: "https://github.com/DarthBenro008/upstash-redis-local"
+    license: "MIT"
+
+dockers:
+  - image_templates:
+      - "darthbenro008/upstash-redis-local:{{ .Tag }}"
+      - "darthbenro008/upstash-redis-local:latest"
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - "--pull"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  header: |
+    ## upstash-redis-local {{ .Tag }} ({{ .Date }})
+    
+    A local server that mimics upstash-redis for local testing purposes!
