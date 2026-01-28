@@ -155,7 +155,24 @@ func (s *Server) executeCommand(commandName string, args ...interface{}) (interf
 	if err != nil {
 		return errorResult{Error: err.Error()}, fasthttp.StatusBadRequest
 	}
-	return successResult{Result: res}, fasthttp.StatusOK
+	return successResult{Result: convertRedisResult(res)}, fasthttp.StatusOK
+}
+
+// convertRedisResult recursively converts []byte to string for JSON serialization
+func convertRedisResult(res interface{}) interface{} {
+	switch v := res.(type) {
+	case []byte:
+		return string(v)
+	case []interface{}:
+		for i, val := range v {
+			v[i] = convertRedisResult(val)
+		}
+		return v
+	case error:
+		return v.Error()
+	default:
+		return v
+	}
 }
 
 func (s *Server) parseToken(ctx *fasthttp.RequestCtx) string {
@@ -163,6 +180,13 @@ func (s *Server) parseToken(ctx *fasthttp.RequestCtx) string {
 	if token != "" {
 		return strings.TrimPrefix(token, "Bearer ")
 	}
+	
+	// Support Upstash style _token query parameter for easier browser access
+	queryToken := string(ctx.QueryArgs().Peek("_token"))
+	if queryToken != "" {
+		return queryToken
+	}
+
 	return ""
 }
 

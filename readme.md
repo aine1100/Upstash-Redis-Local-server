@@ -50,7 +50,7 @@ The easiest way to get started:
 
 ```bash
 # Clone the repository
-git clone https://github.com/DarthBenro008/upstash-redis-local.git
+git clone https://github.com/aine1100/Upstash-Redis-Local-server.git
 cd upstash-redis-local
 
 # Start Redis and upstash-redis-local
@@ -59,6 +59,20 @@ docker-compose up -d
 # Test the connection
 curl -H "Authorization: Bearer local-dev-token" http://localhost:8000/PING
 ```
+
+### Quick Start (Automated Script)
+
+On Windows (Git Bash/WSL), macOS, or Linux, you can use the provided startup script:
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+This script will:
+1. Check if Docker is running.
+2. Attempt to start Docker Desktop if it's closed.
+3. Start the containers using `docker-compose up -d`.
 
 ### Using Docker
 
@@ -74,7 +88,7 @@ docker run --rm -p 8000:8000 --link redis:redis darthbenro008/upstash-redis-loca
 ### Using Homebrew
 
 ```bash
-brew tap DarthBenro008/upstash-redis-local
+brew tap aine1100/Upstash-Redis-Local-server
 brew install upstash-redis-local
 ```
 
@@ -82,7 +96,7 @@ brew install upstash-redis-local
 
 ```bash
 # Clone and build
-git clone https://github.com/DarthBenro008/upstash-redis-local.git
+git clone https://github.com/aine1100/Upstash-Redis-Local-server.git
 cd upstash-redis-local
 make build
 
@@ -92,7 +106,35 @@ make build
 
 ### Manual Installation
 
-Download the latest release from the [releases page](https://github.com/DarthBenro008/upstash-redis-local/releases) for your OS.
+Download the latest release from the [releases page](https://github.com/aine1100/Upstash-Redis-Local-server/releases) for your OS.
+
+## 🔐 Authentication
+
+The server requires an API token to authorize requests. By default, this token is `local-dev-token` (when using Docker Compose) or `upstash`.
+
+### 1. In the Browser
+Append the `_token` query parameter to your URL:
+`http://localhost:8000/PING?_token=local-dev-token`
+
+![Browser PING Result](assets/browser-ping.png)
+
+### 2. In the API Tool (Postman)
+- **URL**: `http://localhost:8000/KEYS/*`
+- **Auth Type**: Select `API Key`
+- **Key**: `_token`
+- **Value**: `local-dev-token`
+- **Add to**: `Query Params` (Recommended)
+
+![Postman Authentication Setup](assets/postman-auth.png)
+
+![Postman KEYS Result](assets/postman-keys.png)
+
+### 3. Using cURL
+```bash
+curl -H "Authorization: Bearer local-dev-token" http://localhost:8000/PING
+# OR
+curl "http://localhost:8000/PING?_token=local-dev-token"
+```
 
 ## 🔧 Using with @upstash/redis
 
@@ -157,9 +199,11 @@ docker exec -it upstash-redis-local-redis-1 redis-cli
 
 ### 3. Using HTTP Requests
 Since this project mimics Upstash, you can just use your browser or `curl`:
-- **Get all keys**: `http://localhost:8000/KEYS/*` 
-- **Get value**: `http://localhost:8000/GET/mykey`
-*(Note: requires the Authorization header)*
+- **Get all keys**: `http://localhost:8000/KEYS/*?_token=local-dev-token` 
+- **Get value**: `http://localhost:8000/GET/mykey?_token=local-dev-token`
+
+> [!NOTE]
+> If you see random strings like `"YnVsb0..."`, it means you were viewing raw bytes. This has been fixed to return readable strings.
 
 ---
 

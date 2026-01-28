@@ -35,17 +35,17 @@ archives:
 
 brews:
   - repository:
-      owner: DarthBenro008
+      owner: aine1100
       name: homebrew-upstash-redis-local
     description: "upstash-redis-local - Test @upstash/redis locally!"
     directory: Formula
-    homepage: "https://github.com/DarthBenro008/upstash-redis-local"
+    homepage: "https://github.com/aine1100/Upstash-Redis-Local-server"
     license: "MIT"
 
 dockers:
   - image_templates:
-      - "darthbenro008/upstash-redis-local:{{ .Tag }}"
-      - "darthbenro008/upstash-redis-local:latest"
+      - "aine1100/upstash-redis-local:{{ .Tag }}"
+      - "aine1100/upstash-redis-local:latest"
     dockerfile: Dockerfile
     build_flag_templates:
       - "--pull"
