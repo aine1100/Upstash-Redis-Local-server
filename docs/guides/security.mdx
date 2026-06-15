@@ -1,0 +1,163 @@
+---
+title: Security
+description: Harden Upstash Redis Local for shared networks and protect API tokens from exposure.
+---
+
+Upstash Redis Local is a **local development tool**, not a production security boundary. These options reduce the risk of token exposure and unauthorized access on your machine or LAN.
+
+<Warning>
+  Never expose this server to the public internet. Never use production Upstash cloud tokens with this project. Use [Upstash Cloud](https://upstash.com) for production.
+</Warning>
+
+## Quick secure setup
+
+One flag enables all hardening:
+
+```bash
+./bin/upstash-redis-local --secure --redis localhost:6379
+```
+
+Or via Docker Compose:
+
+```bash
+UPSTASH_SECURE=true docker compose up -d
+```
+
+This enables:
+
+| Flag | Effect |
+| --- | --- |
+| `--localhost-only` | Bind to `127.0.0.1` only |
+| `--disable-query-token` | Reject `?_token=` in URLs |
+| `--require-dashboard-auth` | Dashboard API requires Bearer token |
+| `--block-dangerous-commands` | Block FLUSHALL, CONFIG, SHUTDOWN, etc. |
+
+## Generate strong tokens
+
+```bash
+make build-cli
+./bin/upstash-local generate-token
+```
+
+Output:
+
+```
+UPSTASH_TOKEN=dev_xxxxxxxx
+UPSTASH_READONLY_TOKEN=ro_xxxxxxxx
+```
+
+Add to `.env` (gitignored). **Never commit tokens.**
+
+## Security flags
+
+### `--localhost-only`
+
+Binds the server to `127.0.0.1` instead of all interfaces.
+
+```bash
+upstash-redis-local --localhost-only --addr :8000
+# listens on 127.0.0.1:8000
+```
+
+Docker Compose binds host ports to localhost by default:
+
+```yaml
+ports:
+  - "127.0.0.1:8000:8000"
+```
+
+### `--disable-query-token`
+
+Blocks authentication via `?_token=` query parameters. Use the header only:
+
+```bash
+curl -H "Authorization: Bearer your-token" http://localhost:8000/PING
+```
+
+<Tip>
+  Query tokens appear in browser history, server logs, and Referer headers. Prefer Bearer auth in apps and scripts.
+</Tip>
+
+### `--cors-origin`
+
+Restrict CORS instead of allowing any origin (`*`):
+
+```bash
+upstash-redis-local --cors-origin http://localhost:3000
+```
+
+### `--require-dashboard-auth`
+
+Dashboard API endpoints require authentication (default: **enabled**):
+
+- `/dashboard/api/stats`
+- `/dashboard/api/keys`
+
+The dashboard UI stores your token in `sessionStorage` and sends it via the `Authorization` header — not in the URL.
+
+### `--block-dangerous-commands`
+
+Blocks destructive Redis commands:
+
+`FLUSHALL`, `FLUSHDB`, `CONFIG`, `SHUTDOWN`, `DEBUG`, `SLAVEOF`, `REPLICAOF`, `MIGRATE`
+
+```bash
+curl -H "Authorization: Bearer token" http://localhost:8000/FLUSHALL
+# {"error":"ERR command 'FLUSHALL' is blocked by local security policy"}
+```
+
+## Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `UPSTASH_SECURE` | `false` | Enable all hardening |
+| `UPSTASH_LOCALHOST_ONLY` | `false` | Bind 127.0.0.1 only |
+| `UPSTASH_DISABLE_QUERY_TOKEN` | `false` | Header-only auth |
+| `UPSTASH_CORS_ORIGIN` | `*` | CORS allowed origin |
+| `UPSTASH_REQUIRE_DASHBOARD_AUTH` | `true` | Protect dashboard API |
+| `UPSTASH_BLOCK_DANGEROUS_COMMANDS` | `false` | Block destructive commands |
+
+## Startup warnings
+
+The server logs warnings when it detects insecure configuration:
+
+- Well-known tokens (`local-dev-token`, `upstash`, etc.)
+- Listening on all interfaces (`0.0.0.0`)
+
+Check logs on startup:
+
+```
+WARN  using a well-known API token — generate a random token for shared networks
+WARN  listening on all network interfaces — use --localhost-only
+```
+
+## Best practices
+
+<Steps>
+  <Step title="Separate local and cloud credentials">
+    Use `.env.local` for localhost tokens only. Keep cloud tokens in `.env.cloud` (gitignored).
+  </Step>
+  <Step title="Use read-only token in browser">
+    Frontend code should use `UPSTASH_READONLY_TOKEN`, never the full-access token.
+  </Step>
+  <Step title="Bind to localhost">
+    Use `127.0.0.1:8000` in Docker port mappings and `--localhost-only` when running natively.
+  </Step>
+  <Step title="Enable --secure on shared Wi-Fi">
+    Coffee shop or office network? Run with `--secure` and random tokens.
+  </Step>
+  <Step title="Never commit secrets">
+    Add `.env`, `.env.local`, `.env.cloud` to `.gitignore`.
+  </Step>
+</Steps>
+
+## What this does NOT protect against
+
+- Malware on your machine
+- Other processes on localhost (anything on your machine can still call `127.0.0.1:8000`)
+- Production workloads — use Upstash Cloud with HTTPS
+
+## Related
+
+- [Authentication](/api-reference/authentication)
+- [Switch from Cloud](/guides/switch-from-cloud) — keep cloud tokens out of local dev

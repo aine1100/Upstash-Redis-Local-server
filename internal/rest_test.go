@@ -18,6 +18,10 @@ import (
 var testPortCounter atomic.Int32
 
 func startTestServer(t *testing.T) (*internal.Server, *miniredis.Miniredis, string) {
+	return startTestServerWithSecurity(t, internal.SecurityConfig{RequireDashboardAuth: true})
+}
+
+func startTestServerWithSecurity(t *testing.T, sec internal.SecurityConfig) (*internal.Server, *miniredis.Miniredis, string) {
 	t.Helper()
 	mr, err := miniredis.Run()
 	if err != nil {
@@ -40,6 +44,7 @@ func startTestServer(t *testing.T) (*internal.Server, *miniredis.Miniredis, stri
 		RedisPool:     pool,
 		Logger:        logger,
 		Metrics:       internal.NewMetrics(),
+		Security:      sec,
 	}
 
 	go server.Serve()
@@ -181,7 +186,9 @@ func TestDashboardStats(t *testing.T) {
 	pingReq.Header.Set("Authorization", "Bearer test-token")
 	http.DefaultClient.Do(pingReq)
 
-	resp, err := http.Get(base + "/dashboard/api/stats")
+	req, _ := http.NewRequest("GET", base+"/dashboard/api/stats", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,6 +197,76 @@ func TestDashboardStats(t *testing.T) {
 	json.Unmarshal(readBody(t, resp), &stats)
 	if stats["total_requests"].(float64) < 1 {
 		t.Fatalf("expected at least 1 request recorded, got %v", stats)
+	}
+}
+
+func TestDashboardStatsUnauthorized(t *testing.T) {
+	_, mr, base := startTestServer(t)
+	defer mr.Close()
+
+	resp, err := http.Get(base + "/dashboard/api/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestDisableQueryToken(t *testing.T) {
+	_, mr, base := startTestServerWithSecurity(t, internal.SecurityConfig{
+		DisableQueryToken:    true,
+		RequireDashboardAuth: true,
+	})
+	defer mr.Close()
+
+	resp, err := http.Get(base + "/PING?_token=test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected query token to be rejected, got %d", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest("GET", base+"/PING", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected header auth to work, got %d", resp.StatusCode)
+	}
+}
+
+func TestBlockDangerousCommands(t *testing.T) {
+	_, mr, base := startTestServerWithSecurity(t, internal.SecurityConfig{
+		BlockDangerousCommands: true,
+		RequireDashboardAuth:   true,
+	})
+	defer mr.Close()
+
+	req, _ := http.NewRequest("GET", base+"/FLUSHALL", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected FLUSHALL to be blocked, got %d", resp.StatusCode)
+	}
+}
+
+func TestResolveListenAddr(t *testing.T) {
+	if got := internal.ResolveListenAddr(":8000", true); got != "127.0.0.1:8000" {
+		t.Fatalf("expected 127.0.0.1:8000, got %s", got)
+	}
+	if got := internal.ResolveListenAddr("0.0.0.0:8000", true); got != "127.0.0.1:8000" {
+		t.Fatalf("expected 127.0.0.1:8000, got %s", got)
 	}
 }
 

@@ -21,15 +21,6 @@ func (s *Server) handleDashboardStats(ctx *fasthttp.RequestCtx) {
 }
 
 func (s *Server) handleDashboardKeys(ctx *fasthttp.RequestCtx) {
-	token := s.parseToken(ctx)
-	if token == "" {
-		token = string(ctx.QueryArgs().Peek("token"))
-	}
-	if token != s.APIToken && token != s.ReadOnlyToken {
-		s.writeJSON(ctx, errorResult{Error: "Unauthorised"}, fasthttp.StatusUnauthorized)
-		return
-	}
-
 	pattern := string(ctx.QueryArgs().Peek("pattern"))
 	if pattern == "" {
 		pattern = "*"
@@ -195,8 +186,22 @@ const dashboardHTML = `<!DOCTYPE html>
   <tbody id="keys"></tbody>
 </table>
 <script>
+function getToken() {
+  const el = document.getElementById('token');
+  const token = el.value.trim();
+  if (token) sessionStorage.setItem('upstash_local_token', token);
+  return token || sessionStorage.getItem('upstash_local_token') || '';
+}
+function authHeaders() {
+  const token = getToken();
+  return token ? { 'Authorization': 'Bearer ' + token } : {};
+}
 async function loadStats() {
-  const r = await fetch('/dashboard/api/stats');
+  const r = await fetch('/dashboard/api/stats', { headers: authHeaders() });
+  if (r.status === 401) {
+    document.getElementById('stats').innerHTML = '<div class="card"><h3>Auth required</h3><div class="val" style="font-size:1rem">Enter your API token below</div></div>';
+    return;
+  }
   const d = await r.json();
   document.getElementById('stats').innerHTML =
     '<div class="card"><h3>Total Requests</h3><div class="val">'+(d.total_requests||0)+'</div></div>'+
@@ -206,13 +211,16 @@ async function loadStats() {
 }
 async function loadKeys() {
   const pattern = document.getElementById('pattern').value;
-  const token = document.getElementById('token').value;
-  const r = await fetch('/dashboard/api/keys?pattern='+encodeURIComponent(pattern)+'&_token='+encodeURIComponent(token));
+  const r = await fetch('/dashboard/api/keys?pattern='+encodeURIComponent(pattern), { headers: authHeaders() });
   const d = await r.json();
   const tbody = document.getElementById('keys');
   if (d.error) { tbody.innerHTML = '<tr><td colspan="4">'+d.error+'</td></tr>'; return; }
   tbody.innerHTML = (d.keys||[]).map(k => '<tr><td>'+k.key+'</td><td><span class="badge">'+k.type+'</span></td><td>'+(k.ttl<0?'∞':k.ttl+'s')+'</td><td>'+JSON.stringify(k.value).slice(0,80)+'</td></tr>').join('');
 }
+(function(){
+  const saved = sessionStorage.getItem('upstash_local_token');
+  if (saved) document.getElementById('token').value = saved;
+})();
 loadStats(); setInterval(loadStats, 5000);
 </script>
 </body>

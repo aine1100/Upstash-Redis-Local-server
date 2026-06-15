@@ -44,6 +44,9 @@ func (s *Server) parseToken(ctx *fasthttp.RequestCtx) string {
 	if token != "" {
 		return strings.TrimPrefix(token, "Bearer ")
 	}
+	if s.disableQueryToken() {
+		return ""
+	}
 	if queryToken := string(ctx.QueryArgs().Peek("_token")); queryToken != "" {
 		return queryToken
 	}

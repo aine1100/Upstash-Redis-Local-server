@@ -163,7 +163,11 @@ func formatResp2(val interface{}) string {
 }
 
 func (s *Server) setCORS(ctx *fasthttp.RequestCtx) {
-	ctx.Response.Header.Set("Access-Control-Allow-Origin", "*")
+	origin := s.corsOrigin()
+	ctx.Response.Header.Set("Access-Control-Allow-Origin", origin)
+	if origin != "*" {
+		ctx.Response.Header.Set("Vary", "Origin")
+	}
 	ctx.Response.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, HEAD, OPTIONS")
 	ctx.Response.Header.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Upstash-Encoding, Upstash-Response-Format, Accept")
 	ctx.Response.Header.Set("Access-Control-Max-Age", "86400")

@@ -56,7 +56,8 @@
               "guides/dashboard",
               "guides/rate-limits",
               "guides/cli",
-              "guides/docker-profiles"
+              "guides/docker-profiles",
+              "guides/security"
             ]
           },
           {

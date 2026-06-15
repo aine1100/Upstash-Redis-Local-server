@@ -18,4 +18,5 @@ type Server struct {
 	Logger        *zap.Logger
 	Metrics       *Metrics
 	RateLimiter   *RateLimiter
+	Security      SecurityConfig
 }

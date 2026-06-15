@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
@@ -18,14 +19,20 @@ import (
 var Version = "development"
 
 type Cmd struct {
-	RedisAddr     string
-	Addr          string
-	ApiToken      string
-	ReadOnlyToken string
-	MaxRetries    int
-	RetryDelayMs  int
-	SimulateQuota int64
-	SimulateRPS   int
+	RedisAddr              string
+	Addr                   string
+	ApiToken               string
+	ReadOnlyToken          string
+	MaxRetries             int
+	RetryDelayMs           int
+	SimulateQuota          int64
+	SimulateRPS            int
+	LocalhostOnly          bool
+	DisableQueryToken      bool
+	CORSOrigin             string
+	RequireDashboardAuth   bool
+	BlockDangerousCommands bool
+	SecureMode             bool
 }
 
 func (c *Cmd) Validate() error {
@@ -66,6 +73,18 @@ func getEnvInt(key string, defaultValue int) int {
 	return defaultValue
 }
 
+func getEnvBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		switch strings.ToLower(value) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return defaultValue
+}
+
 func main() {
 	setupFlags(flag.CommandLine)
 
@@ -82,18 +101,39 @@ func main() {
 	retryDelay := flag.Int("retry-delay", 1000, "Delay between retries in milliseconds")
 	simulateQuota := flag.Int64("simulate-quota", getEnvInt64("SIMULATE_QUOTA", 0), "Simulate Upstash daily quota (0=unlimited)")
 	simulateRPS := flag.Int("simulate-rps", getEnvInt("SIMULATE_RPS", 0), "Simulate Upstash RPS limit (0=unlimited)")
+	localhostOnly := flag.Bool("localhost-only", getEnvBool("UPSTASH_LOCALHOST_ONLY", false), "Bind to 127.0.0.1 only")
+	disableQueryToken := flag.Bool("disable-query-token", getEnvBool("UPSTASH_DISABLE_QUERY_TOKEN", false), "Reject ?_token= query auth")
+	corsOrigin := flag.String("cors-origin", getEnvOrDefault("UPSTASH_CORS_ORIGIN", "*"), "CORS Allow-Origin (* = any)")
+	requireDashboardAuth := flag.Bool("require-dashboard-auth", getEnvBool("UPSTASH_REQUIRE_DASHBOARD_AUTH", true), "Require auth for dashboard API")
+	blockDangerous := flag.Bool("block-dangerous-commands", getEnvBool("UPSTASH_BLOCK_DANGEROUS_COMMANDS", false), "Block FLUSHALL, CONFIG, SHUTDOWN, etc.")
+	secureMode := flag.Bool("secure", getEnvBool("UPSTASH_SECURE", false), "Enable all security hardening flags")
 	help := flag.Bool("help", false, "Print help message")
 	flag.Parse()
 
+	listenAddr := internal.ResolveListenAddr(*addr, *localhostOnly)
+	if *secureMode {
+		*localhostOnly = true
+		*disableQueryToken = true
+		*requireDashboardAuth = true
+		*blockDangerous = true
+		listenAddr = internal.ResolveListenAddr(*addr, true)
+	}
+
 	cmd := Cmd{
-		RedisAddr:     *redisAddr,
-		ApiToken:      *apiToken,
-		ReadOnlyToken: *readOnlyToken,
-		Addr:          *addr,
-		MaxRetries:    *maxRetries,
-		RetryDelayMs:  *retryDelay,
-		SimulateQuota: *simulateQuota,
-		SimulateRPS:   *simulateRPS,
+		RedisAddr:              *redisAddr,
+		ApiToken:               *apiToken,
+		ReadOnlyToken:          *readOnlyToken,
+		Addr:                   listenAddr,
+		MaxRetries:             *maxRetries,
+		RetryDelayMs:           *retryDelay,
+		SimulateQuota:          *simulateQuota,
+		SimulateRPS:            *simulateRPS,
+		LocalhostOnly:          *localhostOnly,
+		DisableQueryToken:      *disableQueryToken,
+		CORSOrigin:             *corsOrigin,
+		RequireDashboardAuth:   *requireDashboardAuth,
+		BlockDangerousCommands: *blockDangerous,
+		SecureMode:             *secureMode,
 	}
 
 	if *help {
@@ -130,6 +170,14 @@ func main() {
 		)
 	}
 
+	sec := internal.SecurityConfig{
+		DisableQueryToken:      cmd.DisableQueryToken,
+		CORSOrigin:             cmd.CORSOrigin,
+		RequireDashboardAuth:   cmd.RequireDashboardAuth,
+		BlockDangerousCommands: cmd.BlockDangerousCommands,
+	}
+	internal.LogSecurityWarnings(logger, cmd.Addr, cmd.ApiToken, cmd.ReadOnlyToken, sec, cmd.SecureMode)
+
 	server := internal.Server{
 		Address:       cmd.Addr,
 		APIToken:      cmd.ApiToken,
@@ -138,6 +186,7 @@ func main() {
 		Logger:        logger,
 		Metrics:       internal.NewMetrics(),
 		RateLimiter:   limiter,
+		Security:      sec,
 	}
 	server.Serve()
 }
@@ -170,15 +219,27 @@ ARGUMENTS:
 	--retry-delay      MS     Retry delay in ms (default: 1000)
 	--simulate-quota   N      Simulate Upstash daily quota (0=unlimited)
 	--simulate-rps     N      Simulate Upstash RPS limit (0=unlimited)
+	--localhost-only          Bind to 127.0.0.1 only (recommended on shared Wi-Fi)
+	--disable-query-token     Reject ?_token= in URLs (use Authorization header)
+	--cors-origin      ORIGIN CORS Allow-Origin (default: *)
+	--require-dashboard-auth  Require auth for dashboard API (default: true)
+	--block-dangerous-commands Block FLUSHALL, CONFIG, SHUTDOWN, etc.
+	--secure                  Enable all hardening flags above
 	--help                    Print this message
 
 ENVIRONMENT VARIABLES:
-	REDIS_ADDR              Redis server address
-	UPSTASH_ADDR            Webserver address
-	UPSTASH_TOKEN           Full-access API token
-	UPSTASH_READONLY_TOKEN  Read-only API token
-	SIMULATE_QUOTA          Daily quota simulation
-	SIMULATE_RPS            RPS limit simulation
+	REDIS_ADDR                    Redis server address
+	UPSTASH_ADDR                  Webserver address
+	UPSTASH_TOKEN                 Full-access API token
+	UPSTASH_READONLY_TOKEN        Read-only API token
+	SIMULATE_QUOTA                Daily quota simulation
+	SIMULATE_RPS                  RPS limit simulation
+	UPSTASH_LOCALHOST_ONLY        Bind to 127.0.0.1 only
+	UPSTASH_DISABLE_QUERY_TOKEN   Reject query-string tokens
+	UPSTASH_CORS_ORIGIN           CORS origin (default: *)
+	UPSTASH_REQUIRE_DASHBOARD_AUTH Require dashboard auth (default: true)
+	UPSTASH_BLOCK_DANGEROUS_COMMANDS Block destructive Redis commands
+	UPSTASH_SECURE                Enable all security hardening
 
 ENDPOINTS:
 	/health          Health check (no auth)

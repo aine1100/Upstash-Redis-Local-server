@@ -36,10 +36,18 @@ func (s *Server) requestHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if path == "/dashboard/api/stats" {
+		if err := s.authenticateDashboard(ctx); err != nil {
+			s.respond(ctx, errorResult{Error: "Unauthorised"}, fasthttp.StatusUnauthorized)
+			return
+		}
 		s.handleDashboardStats(ctx)
 		return
 	}
 	if path == "/dashboard/api/keys" {
+		if err := s.authenticateDashboard(ctx); err != nil {
+			s.respond(ctx, errorResult{Error: "Unauthorised"}, fasthttp.StatusUnauthorized)
+			return
+		}
 		s.handleDashboardKeys(ctx)
 		return
 	}

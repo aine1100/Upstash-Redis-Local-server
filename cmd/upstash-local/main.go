@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -64,6 +66,8 @@ func main() {
 			url = os.Args[2]
 		}
 		ping(url, token)
+	case "generate-token":
+		generateToken()
 	default:
 		printUsage()
 		os.Exit(1)
@@ -80,7 +84,8 @@ Commands:
   seed             Seed test keys (--keys 100 --prefix dev:)
   export           Export keys to JSON (--output dump.json)
   import           Import keys from JSON (--input dump.json)
-  ping [url]       Test REST connection`)
+  ping [url]       Test REST connection
+  generate-token   Generate random local API tokens`)
 }
 
 func useProfile(name string) {
@@ -245,4 +250,22 @@ func importData(url, token, input string) {
 		os.Exit(1)
 	}
 	fmt.Printf("✅ Imported %d keys (HTTP %d): %s\n", len(cmds), code, strings.TrimSpace(string(respData)))
+}
+
+func generateToken() {
+	full := randomToken("dev")
+	readOnly := randomToken("ro")
+	fmt.Println("Add these to your .env (never commit real cloud tokens):")
+	fmt.Printf("UPSTASH_TOKEN=%s\n", full)
+	fmt.Printf("UPSTASH_READONLY_TOKEN=%s\n", readOnly)
+	fmt.Printf("UPSTASH_REDIS_REST_TOKEN=%s\n", full)
+	fmt.Printf("UPSTASH_REDIS_REST_READONLY_TOKEN=%s\n", readOnly)
+}
+
+func randomToken(prefix string) string {
+	var buf [24]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		panic(err)
+	}
+	return prefix + "_" + base64.RawURLEncoding.EncodeToString(buf[:])
 }

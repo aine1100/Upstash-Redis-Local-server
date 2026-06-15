@@ -16,6 +16,9 @@ func (s *Server) executeCommand(auth *authResult, commandName string, args ...in
 	if err := s.isCommandAllowed(auth, cmdUpper); err != nil {
 		return errorResult{Error: err.Error()}, fasthttp.StatusBadRequest
 	}
+	if err := s.isDangerousCommandBlocked(cmdUpper); err != nil {
+		return errorResult{Error: err.Error()}, fasthttp.StatusBadRequest
+	}
 
 	if strings.ToLower(commandName) == "acl" && len(args) > 0 && strings.ToLower(fmt.Sprint(args[0])) == "resttoken" {
 		return s.aclRestToken(args...)
@@ -56,6 +59,9 @@ func (s *Server) executeMultiExec(auth *authResult, requests [][]interface{}) (i
 			return errorResult{Error: "ERR empty transaction command"}, fasthttp.StatusBadRequest
 		}
 		if err := s.isCommandAllowed(auth, strings.ToUpper(fmt.Sprint(req[0]))); err != nil {
+			return errorResult{Error: err.Error()}, fasthttp.StatusBadRequest
+		}
+		if err := s.isDangerousCommandBlocked(strings.ToUpper(fmt.Sprint(req[0]))); err != nil {
 			return errorResult{Error: err.Error()}, fasthttp.StatusBadRequest
 		}
 	}
