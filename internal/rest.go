@@ -84,8 +84,54 @@ func (s *Server) requestHandler(ctx *fasthttp.RequestCtx) {
 		s.handleDashboardKeys(ctx)
 		return
 	}
+	if path == "/dashboard/api/monitor" {
+		if err := s.authenticateDashboard(ctx); err != nil {
+			s.respond(ctx, errorResult{Error: "Unauthorised"}, fasthttp.StatusUnauthorized)
+			return
+		}
+		s.handleDashboardMonitor(ctx)
+		return
+	}
+	if path == "/dashboard/api/execute" && ctx.IsPost() {
+		if err := s.authenticateDashboard(ctx); err != nil {
+			s.respond(ctx, errorResult{Error: "Unauthorised"}, fasthttp.StatusUnauthorized)
+			return
+		}
+		s.handleDashboardExecute(ctx)
+		return
+	}
+	if path == "/dashboard/api/snapshots" {
+		if err := s.authenticateDashboard(ctx); err != nil {
+			s.respond(ctx, errorResult{Error: "Unauthorised"}, fasthttp.StatusUnauthorized)
+			return
+		}
+		if ctx.IsGet() {
+			s.handleSnapshotList(ctx)
+		}
+		return
+	}
+	if strings.HasPrefix(path, "/dashboard/api/snapshots/") {
+		if err := s.authenticateDashboard(ctx); err != nil {
+			s.respond(ctx, errorResult{Error: "Unauthorised"}, fasthttp.StatusUnauthorized)
+			return
+		}
+		name := strings.Trim(strings.TrimPrefix(path, "/dashboard/api/snapshots/"), "/")
+		if strings.HasSuffix(name, "/restore") && ctx.IsPost() {
+			s.handleSnapshotRestore(ctx, strings.TrimSuffix(name, "/restore"))
+			return
+		}
+		switch {
+		case ctx.IsPost():
+			s.handleSnapshotSave(ctx, name)
+		case ctx.IsDelete():
+			s.handleSnapshotDelete(ctx, name)
+		default:
+			s.respond(ctx, nil, fasthttp.StatusMethodNotAllowed)
+		}
+		return
+	}
 
-	if !ctx.IsGet() && !ctx.IsPost() && !ctx.IsHead() && !ctx.IsPut() {
+	if !ctx.IsGet() && !ctx.IsPost() && !ctx.IsHead() && !ctx.IsPut() && !ctx.IsDelete() {
 		s.respond(ctx, nil, fasthttp.StatusMethodNotAllowed)
 		return
 	}
@@ -113,6 +159,7 @@ func (s *Server) requestHandler(ctx *fasthttp.RequestCtx) {
 
 	if s.QStash != nil {
 		original := string(ctx.URI().PathOriginal())
+		method := string(ctx.Method())
 		switch {
 		case strings.HasPrefix(original, "/v2/publish/"):
 			s.handleQStashPublish(ctx, strings.TrimPrefix(original, "/v2/publish/"))
@@ -120,8 +167,15 @@ func (s *Server) requestHandler(ctx *fasthttp.RequestCtx) {
 		case path == "/v2/messages":
 			s.handleQStashList(ctx)
 			return
+		case strings.HasPrefix(path, "/v2/messages/"):
+			s.handleQStashGetMessage(ctx, strings.TrimPrefix(path, "/v2/messages/"))
+			return
 		case path == "/v2/dlq":
 			s.handleQStashDLQ(ctx)
+			return
+		case strings.HasPrefix(path, "/v2/dlq/") && strings.HasSuffix(path, "/replay") && method == "POST":
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/v2/dlq/"), "/replay")
+			s.handleQStashReplayDLQ(ctx, id)
 			return
 		}
 	}

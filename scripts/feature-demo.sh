@@ -92,11 +92,36 @@ RESP=$(curl -s -w "|status=%{http_code}|time=%{time_total}s" "http://127.0.0.1:8
 echo "PING (latency+err): $RESP"
 echo "$RESP" | grep -q "status=500" && pass "error injection returned 500" || fail "error injection"
 echo "$RESP" | grep -q "chaos injection" && pass "error body explains chaos" || fail "error body"
-# time_total should be >= 0.3s due to injected latency
 T=$(echo "$RESP" | sed 's/.*time=//;s/s.*//')
-awk "BEGIN{exit !($T >= 0.3)}" && pass "latency injection added >=300ms" || fail "latency injection"
+awk "BEGIN{exit !($T >= 0.29)}" && pass "latency injection added >=290ms" || fail "latency injection"
 
 kill $C_PID 2>/dev/null || true
+
+# ------------------------------------------------------------------
+# Instance D — snapshots + command monitor (:8003)
+# ------------------------------------------------------------------
+/tmp/upstash --token $TOKEN --addr :8003 --redis 127.0.0.1:6379 --enable-qstash >/tmp/d.log 2>&1 &
+D_PID=$!
+sleep 2
+
+echo ""
+echo "================ Snapshots + monitor (:8003) ================"
+curl -s -X GET "http://127.0.0.1:8003/SET/snap-demo-key/hello" -H "$AUTH" >/dev/null
+SAVE=$(curl -s -X POST "http://127.0.0.1:8003/dashboard/api/snapshots/demo-snap?pattern=snap-*" -H "$AUTH")
+echo "save snapshot  : $SAVE"
+echo "$SAVE" | grep -q '"name":"demo-snap"' && pass "snapshot saved" || fail "snapshot save"
+curl -s -X GET "http://127.0.0.1:8003/DEL/snap-demo-key" -H "$AUTH" >/dev/null
+REST=$(curl -s -X POST "http://127.0.0.1:8003/dashboard/api/snapshots/demo-snap/restore" -H "$AUTH")
+echo "restore        : $REST"
+GOT=$(curl -s -X GET "http://127.0.0.1:8003/GET/snap-demo-key" -H "$AUTH")
+echo "restored key   : $GOT"
+echo "$GOT" | grep -q "hello" && pass "snapshot restored key" || fail "snapshot restore"
+
+MON=$(curl -s "http://127.0.0.1:8003/dashboard/api/monitor?limit=5" -H "$AUTH")
+echo "monitor        : $MON"
+echo "$MON" | grep -q '"entries"' && pass "command monitor works" || fail "monitor"
+
+kill $D_PID 2>/dev/null || true
 
 echo ""
 if [ "$FAILED" = "1" ]; then

@@ -125,6 +125,16 @@ curl http://localhost:8000/v2/dlq -H "Authorization: Bearer local-dev-token"
 
 See [docs/guides/qstash.mdx](./docs/guides/qstash.mdx).
 
+## 🌐 Deployment (VPS, Render, Vercel)
+
+This server is meant for **local dev**. For team shared dev or staging:
+
+- **VPS / Docker** — `docker compose up -d` on a small server (recommended)
+- **Render** — Docker web service; use included `render.yaml` blueprint
+- **Vercel** — do **not** host this server; deploy your app there and use Upstash Cloud in prod
+
+See [docs/guides/deployment.mdx](./docs/guides/deployment.mdx).
+
 ## 🔧 CLI Commands
 
 ```bash

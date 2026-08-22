@@ -231,10 +231,15 @@ func main() {
 	var qstash *internal.QStash
 	if cmd.EnableQStash {
 		qstash = internal.NewQStash(pool, logger)
+		signKey := getEnvOrDefault("UPSTASH_QSTASH_SIGNING_KEY", cmd.ApiToken)
+		qstash.SetSigningKey(signKey)
 		qstash.Start()
 		defer qstash.Stop()
 		logger.Info("QStash emulator enabled (POST /v2/publish/<url>, GET /v2/messages, GET /v2/dlq)")
 	}
+
+	commandACL := internal.NewCommandACL()
+	commandACL.LoadFromRedis(pool, logger)
 
 	server := internal.Server{
 		Address:       cmd.Addr,
@@ -249,6 +254,8 @@ func main() {
 		LogRequests:   cmd.LogRequests,
 		Recorder:      recorder,
 		QStash:        qstash,
+		CommandLog:    internal.NewCommandLog(200),
+		CommandACL:    commandACL,
 		Dial: func() (redis.Conn, error) {
 			return dialWithRetry(cmd.RedisAddr, 1, cmd.RetryDelayMs, logger)
 		},
