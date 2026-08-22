@@ -26,19 +26,6 @@ var readOnlyBlocked = map[string]bool{
 	"DEBUG": true, "CONFIG": true, "SHUTDOWN": true,
 }
 
-var writeCommands = map[string]bool{
-	"SET": true, "SETEX": true, "SETNX": true, "MSET": true, "MSETNX": true,
-	"DEL": true, "UNLINK": true, "INCR": true, "INCRBY": true, "DECR": true,
-	"DECRBY": true, "APPEND": true, "GETSET": true, "HSET": true, "HMSET": true,
-	"HINCRBY": true, "HINCRBYFLOAT": true, "HDEL": true, "LPUSH": true,
-	"RPUSH": true, "LPOP": true, "RPOP": true, "LSET": true, "LREM": true,
-	"LTRIM": true, "SADD": true, "SREM": true, "SPOP": true, "SMOVE": true,
-	"ZADD": true, "ZREM": true, "ZINCRBY": true, "EXPIRE": true, "EXPIREAT": true,
-	"PERSIST": true, "RENAME": true, "RENAMENX": true, "PUBLISH": true,
-	"XADD": true, "XDEL": true, "XTRIM": true, "JSON.SET": true, "JSON.DEL": true,
-	"MULTI": true, "EXEC": true, "DISCARD": true, "RESTORE": true, "MIGRATE": true,
-}
-
 func (s *Server) parseToken(ctx *fasthttp.RequestCtx) string {
 	token := string(ctx.Request.Header.Peek("Authorization"))
 	if token != "" {
@@ -78,7 +65,7 @@ func (s *Server) isCommandAllowed(auth *authResult, commandName string) error {
 		return nil
 	}
 	cmd := strings.ToUpper(commandName)
-	if writeCommands[cmd] {
+	if s.CommandACL != nil && s.CommandACL.IsWrite(cmd) {
 		return fmt.Errorf("NOPERM this user has no permissions to run the '%s' command", cmd)
 	}
 	if readOnlyBlocked[cmd] {

@@ -1,0 +1,172 @@
+---
+title: "Deployment"
+description: "Where to run upstash-redis-local — local machine, VPS, Render, and why not Vercel."
+---
+
+Upstash Redis Local is a **local development tool**, not a production replacement for Upstash Cloud. Most users run it on their laptop or in Docker on `localhost`.
+
+That said, some teams want a **shared dev/staging instance** everyone can point at. This page covers what makes sense on each platform.
+
+## Quick decision
+
+| Platform | Host this server? | Recommended use |
+| --- | --- | --- |
+| **Your machine / Docker** | ✅ Yes | Default — unlimited local dev |
+| **VPS / normal server** | ✅ Yes | Shared team dev, CI runner, homelab |
+| **Render** | ✅ Yes (Docker) | Shared dev/staging URL for the team |
+| **Vercel** | ❌ No | Deploy your **app** here; use Upstash Cloud in prod |
+| **Upstash Cloud** | ❌ No | Use for production Redis |
+
+<Warning>
+Do not expose an unsecured instance to the public internet. Always use `--secure`, random tokens, and auth on shared deployments.
+</Warning>
+
+---
+
+## Local machine (default)
+
+```bash
+./start.sh
+# or
+docker compose up -d
+```
+
+Point your app at `http://localhost:8000`. See [Quickstart](/quickstart).
+
+---
+
+## Normal server (VPS, VM, bare metal)
+
+Best for a **private team dev server** on a small VPS (Hetzner, DigitalOcean, AWS EC2, etc.).
+
+### Option A — Docker Compose (recommended)
+
+```bash
+git clone https://github.com/aine1100/Upstash-Redis-Local-server.git
+cd Upstash-Redis-Local-server
+cp .env.example .env
+# Edit .env: set UPSTASH_TOKEN to a random value
+docker compose up -d
+```
+
+Put nginx or Caddy in front with TLS if the server is reachable outside your VPN:
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:8000;
+  proxy_set_header Authorization $http_authorization;
+}
+```
+
+Bind only to localhost in Docker (default in this repo) and expose via the reverse proxy — not directly on `0.0.0.0:8000`.
+
+### Option B — Binary + systemd
+
+```bash
+go build -o /usr/local/bin/upstash-redis-local .
+useradd -r -s /bin/false upstash
+cp deploy/upstash-local.service /etc/systemd/system/
+# Edit Environment= lines (token, REDIS_ADDR)
+systemctl daemon-reload
+systemctl enable --now upstash-local
+```
+
+Requires Redis running locally (`redis-server` or managed Redis). Health check: `curl http://127.0.0.1:8000/health`.
+
+---
+
+## Render
+
+Render can run this as a **Docker web service** — useful for a shared dev URL your whole team hits instead of everyone running Docker locally.
+
+<Note>
+This is for **development/staging**, not production. Free tier sleeps; use a paid plan if the team needs it always-on.
+</Note>
+
+### Deploy with Blueprint
+
+1. Fork or connect this repo on [Render](https://render.com).
+2. Use the included `render.yaml` blueprint, or create a **Web Service → Docker**.
+3. Set environment variables in the Render dashboard:
+
+| Variable | Example |
+| --- | --- |
+| `REDIS_ADDR` | `red-xxxxx:6379` (Render Redis internal host) or external Redis |
+| `UPSTASH_TOKEN` | random string (Render can auto-generate) |
+| `UPSTASH_READONLY_TOKEN` | random string |
+| `UPSTASH_SECURE` | `true` |
+| `UPSTASH_REQUIRE_DASHBOARD_AUTH` | `true` |
+
+4. Health check path: `/health`
+5. Your team sets:
+
+```env
+UPSTASH_REDIS_REST_URL=https://your-service.onrender.com
+UPSTASH_REDIS_REST_TOKEN=<your-token>
+```
+
+### Render + Redis
+
+You need a real Redis backend. Options:
+
+- **Render Redis** (managed) — set `REDIS_ADDR` to the internal `hostname:6379` from the Render dashboard
+- **Upstash Redis** (cloud) — use the TCP/`rediss://` endpoint host (this proxy still saves REST quota for clients using `@upstash/redis`)
+- **External Redis** on another host
+
+<Tip>
+If you tried Redis lists for email queues on Render and it failed, use the [QStash emulator](/guides/qstash) (`--enable-qstash`) instead — HTTP delivery fits Render's model better than blocking Redis commands.
+</Tip>
+
+---
+
+## Vercel
+
+**You cannot run upstash-redis-local on Vercel.** Vercel is serverless — no long-lived Go process, no background QStash worker, no persistent Redis connection pool.
+
+### The correct Vercel pattern
+
+| Environment | Redis URL |
+| --- | --- |
+| Local dev | `http://localhost:8000` (this server) |
+| Vercel preview/production | `https://xxx.upstash.io` (Upstash Cloud) |
+
+```env
+# .env.local (local — gitignored)
+UPSTASH_REDIS_REST_URL=http://localhost:8000
+UPSTASH_REDIS_REST_TOKEN=local-dev-token
+
+# Vercel dashboard → Environment Variables (production)
+UPSTASH_REDIS_REST_URL=https://your-db.upstash.io
+UPSTASH_REDIS_REST_TOKEN=your-cloud-token
+```
+
+Your `@upstash/redis` code stays identical:
+
+```ts
+import { Redis } from "@upstash/redis";
+const redis = Redis.fromEnv(); // reads URL + token from env
+```
+
+Use `upstash-local use dev` locally and set Vercel env vars in the dashboard for production. No code changes.
+
+### Optional: Vercel previews → shared Render dev
+
+For preview deployments that should not hit production Upstash:
+
+1. Deploy this server on Render (shared dev instance)
+2. In Vercel → **Preview** environment variables, point `UPSTASH_REDIS_REST_URL` at the Render URL
+3. Keep **Production** pointed at Upstash Cloud
+
+---
+
+## What not to do
+
+- Don't use this as production Redis — no SLA, no Upstash durability guarantees
+- Don't deploy without `--secure` on any network-accessible host
+- Don't expect Vercel/Railway serverless to run the binary — use Docker/PaaS with a persistent web service instead
+
+## Related
+
+- [Security](/configuration/security) — tokens, `--secure`, localhost binding
+- [QStash emulator](/guides/qstash) — local HTTP queues for webhooks/email
+- [SDK integration](/guides/upstash-redis-sdk) — env switching dev ↔ cloud

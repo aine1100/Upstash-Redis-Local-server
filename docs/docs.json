@@ -47,7 +47,8 @@
               "guides/rate-limit-simulation",
               "guides/data-management",
               "guides/qstash",
-              "guides/testing-tools"
+              "guides/testing-tools",
+              "guides/deployment"
             ]
           },
           {
