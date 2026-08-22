@@ -2,7 +2,9 @@ package internal
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -34,19 +36,21 @@ type QStash struct {
 	httpClient *http.Client
 	interval   time.Duration
 	stop       chan struct{}
+	signingKey string
 }
 
 type qstashMessage struct {
-	ID          string            `json:"messageId"`
-	Destination string            `json:"destination"`
-	Body        string            `json:"body"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Retries     int               `json:"retries"`
-	MaxRetries  int               `json:"maxRetries"`
-	State       string            `json:"state"`
-	CreatedAt   int64             `json:"createdAt"`
-	NotBefore   int64             `json:"notBefore"`
-	LastError   string            `json:"lastError,omitempty"`
+	ID                string            `json:"messageId"`
+	Destination       string            `json:"destination"`
+	Body              string            `json:"body"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	Retries           int               `json:"retries"`
+	MaxRetries        int               `json:"maxRetries"`
+	State             string            `json:"state"`
+	CreatedAt         int64             `json:"createdAt"`
+	NotBefore         int64             `json:"notBefore"`
+	LastError         string            `json:"lastError,omitempty"`
+	ScheduleInterval  string            `json:"scheduleInterval,omitempty"`
 }
 
 // NewQStash builds a QStash worker bound to a Redis pool.
@@ -58,6 +62,11 @@ func NewQStash(pool *redis.Pool, logger *zap.Logger) *QStash {
 		interval:   time.Second,
 		stop:       make(chan struct{}),
 	}
+}
+
+// SetSigningKey enables Upstash-Signature HMAC headers on delivered messages.
+func (q *QStash) SetSigningKey(key string) {
+	q.signingKey = key
 }
 
 // SetPollInterval overrides how often the queue is scanned for due messages.
@@ -127,6 +136,9 @@ func (q *QStash) deliver(conn redis.Conn, id string) {
 	for k, v := range msg.Headers {
 		req.Header.Set(k, v)
 	}
+	if sig := q.signBody(msg.Body); sig != "" {
+		req.Header.Set("Upstash-Signature", sig)
+	}
 
 	resp, err := q.httpClient.Do(req)
 	success := err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300
@@ -137,7 +149,19 @@ func (q *QStash) deliver(conn redis.Conn, id string) {
 	if success {
 		msg.State = "delivered"
 		msg.LastError = ""
+		msg.Retries = 0
 		saveMessage(conn, msg)
+		if msg.ScheduleInterval != "" {
+			if d := parseScheduleInterval(msg.ScheduleInterval); d > 0 {
+				next := time.Now().Add(d).UnixMilli()
+				msg.NotBefore = next
+				msg.State = "scheduled"
+				saveMessage(conn, msg)
+				conn.Do("ZADD", qstashQueueKey, next, msg.ID)
+				q.logger.Info("qstash rescheduled", zap.String("id", id), zap.Duration("every", d))
+				return
+			}
+		}
 		conn.Do("EXPIRE", qstashMsgPrefix+id, deliveredTTL)
 		q.logger.Info("qstash delivered", zap.String("id", id), zap.String("dest", msg.Destination))
 		return
@@ -212,6 +236,28 @@ func newMessageID() string {
 }
 
 // parseDelay accepts a Go duration ("10s", "2m") or a bare number of seconds.
+func parseScheduleInterval(raw string) time.Duration {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	raw = strings.TrimPrefix(raw, "every ")
+	if raw == "" {
+		return 0
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return 0
+}
+
+func (q *QStash) signBody(body string) string {
+	if q.signingKey == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(q.signingKey))
+	mac.Write([]byte(body))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// parseDelay accepts a Go duration ("10s", "2m") or a bare number of seconds.
 func parseDelay(raw string) time.Duration {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -261,15 +307,17 @@ func (s *Server) handleQStashPublish(ctx *fasthttp.RequestCtx, rawDestination st
 
 	now := time.Now()
 	notBefore := now.Add(delay).UnixMilli()
+	schedule := strings.TrimSpace(string(ctx.Request.Header.Peek("Upstash-Schedule")))
 	msg := &qstashMessage{
-		ID:          newMessageID(),
-		Destination: destination,
-		Body:        string(ctx.PostBody()),
-		Headers:     forwarded,
-		MaxRetries:  maxRetries,
-		State:       "queued",
-		CreatedAt:   now.UnixMilli(),
-		NotBefore:   notBefore,
+		ID:               newMessageID(),
+		Destination:      destination,
+		Body:             string(ctx.PostBody()),
+		Headers:          forwarded,
+		MaxRetries:       maxRetries,
+		State:            "queued",
+		CreatedAt:        now.UnixMilli(),
+		NotBefore:        notBefore,
+		ScheduleInterval: schedule,
 	}
 
 	conn := s.RedisPool.Get()
@@ -319,4 +367,35 @@ func (s *Server) handleQStashDLQ(ctx *fasthttp.RequestCtx) {
 		}
 	}
 	s.writeJSON(ctx, map[string]interface{}{"messages": messages, "count": len(messages)}, fasthttp.StatusOK)
+}
+
+func (s *Server) handleQStashGetMessage(ctx *fasthttp.RequestCtx, id string) {
+	conn := s.RedisPool.Get()
+	defer conn.Close()
+	msg, err := loadMessage(conn, id)
+	if err != nil {
+		s.writeJSON(ctx, errorResult{Error: "message not found"}, fasthttp.StatusNotFound)
+		return
+	}
+	s.writeJSON(ctx, msg, fasthttp.StatusOK)
+}
+
+func (s *Server) handleQStashReplayDLQ(ctx *fasthttp.RequestCtx, id string) {
+	conn := s.RedisPool.Get()
+	defer conn.Close()
+
+	msg, err := loadMessage(conn, id)
+	if err != nil {
+		s.writeJSON(ctx, errorResult{Error: "message not found"}, fasthttp.StatusNotFound)
+		return
+	}
+	conn.Do("LREM", qstashDLQKey, 0, id)
+	msg.Retries = 0
+	msg.LastError = ""
+	msg.State = "queued"
+	next := time.Now().UnixMilli()
+	msg.NotBefore = next
+	saveMessage(conn, msg)
+	conn.Do("ZADD", qstashQueueKey, next, id)
+	s.writeJSON(ctx, map[string]string{"messageId": id, "state": "queued"}, fasthttp.StatusOK)
 }

@@ -22,3 +22,5 @@ go.work
 .idea/
 upstash-redis-local
 bin/
+config.bat
+node_modules

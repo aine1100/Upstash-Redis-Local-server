@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/gomodule/redigo/redis"
@@ -51,6 +52,34 @@ func (s *Server) handleDashboardKeys(ctx *fasthttp.RequestCtx) {
 	}
 
 	s.writeJSON(ctx, map[string]interface{}{"keys": items, "count": len(items)}, fasthttp.StatusOK)
+}
+
+func (s *Server) handleDashboardMonitor(ctx *fasthttp.RequestCtx) {
+	limit := ctx.QueryArgs().GetUintOrZero("limit")
+	if s.CommandLog == nil {
+		s.writeJSON(ctx, map[string]interface{}{"entries": []commandEntry{}, "count": 0}, fasthttp.StatusOK)
+		return
+	}
+	entries := s.CommandLog.Recent(int(limit))
+	s.writeJSON(ctx, map[string]interface{}{"entries": entries, "count": len(entries)}, fasthttp.StatusOK)
+}
+
+func (s *Server) handleDashboardExecute(ctx *fasthttp.RequestCtx) {
+	var payload struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &payload); err != nil || payload.Command == "" {
+		s.writeJSON(ctx, errorResult{Error: "command required"}, fasthttp.StatusBadRequest)
+		return
+	}
+	args := make([]interface{}, len(payload.Args))
+	for i, a := range payload.Args {
+		args[i] = a
+	}
+	auth := &authResult{creds: credentials{}}
+	res, code := s.executeCommand(auth, payload.Command, args...)
+	s.writeJSON(ctx, res, code)
 }
 
 // scanKeys iterates keys with a non-blocking SCAN cursor instead of KEYS.
@@ -196,6 +225,12 @@ const dashboardHTML = `<!DOCTYPE html>
   input { background: #1e293b; border: 1px solid #475569; color: #e2e8f0; padding: .5rem .75rem; border-radius: 8px; margin-right: .5rem; }
   button { background: #38bdf8; color: #0f172a; border: none; padding: .5rem 1rem; border-radius: 8px; cursor: pointer; font-weight: 600; }
   .toolbar { margin-bottom: 1rem; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  .tabs { display: flex; gap: .5rem; margin-bottom: 1rem; }
+  .tab { background: #334155; color: #e2e8f0; border: none; padding: .5rem 1rem; border-radius: 8px; cursor: pointer; }
+  .tab.active { background: #38bdf8; color: #0f172a; font-weight: 600; }
+  .panel { display: none; } .panel.active { display: block; }
+  .mono { font-family: ui-monospace, monospace; font-size: .8rem; }
+  pre { background: #1e293b; padding: 1rem; border-radius: 8px; overflow: auto; max-height: 300px; }
 </style>
 </head>
 <body>
@@ -203,37 +238,81 @@ const dashboardHTML = `<!DOCTYPE html>
 <p class="sub">Unlimited local dev — no cloud rate limits</p>
 <div class="grid" id="stats"></div>
 <div class="toolbar">
-  <input id="pattern" placeholder="Key pattern" value="*">
-  <input id="token" placeholder="Token" value="local-dev-token">
-  <button onclick="loadKeys()">Browse Keys</button>
+  <input id="token" placeholder="API token" value="local-dev-token" style="min-width:200px">
   <button onclick="loadStats()">Refresh Stats</button>
 </div>
-<table>
-  <thead><tr><th>Key</th><th>Type</th><th>TTL</th><th>Value</th></tr></thead>
-  <tbody id="keys"></tbody>
-</table>
+<div class="tabs">
+  <button class="tab active" onclick="showTab('keys')">Keys</button>
+  <button class="tab" onclick="showTab('monitor')">Live Monitor</button>
+  <button class="tab" onclick="showTab('qstash')">QStash</button>
+  <button class="tab" onclick="showTab('snapshots')">Snapshots</button>
+  <button class="tab" onclick="showTab('cli')">Run Command</button>
+</div>
+<div id="panel-keys" class="panel active">
+  <div class="toolbar">
+    <input id="pattern" placeholder="Key pattern" value="*">
+    <button onclick="loadKeys()">Browse Keys</button>
+  </div>
+  <table><thead><tr><th>Key</th><th>Type</th><th>TTL</th><th>Value</th></tr></thead><tbody id="keys"></tbody></table>
+</div>
+<div id="panel-monitor" class="panel">
+  <button onclick="loadMonitor()">Refresh</button>
+  <pre id="monitor" class="mono"></pre>
+</div>
+<div id="panel-qstash" class="panel">
+  <button onclick="loadQStash()">Refresh Messages</button>
+  <button onclick="loadDLQ()">Refresh DLQ</button>
+  <h3 style="margin:1rem 0 .5rem">Messages</h3>
+  <pre id="qstash-msgs" class="mono"></pre>
+  <h3 style="margin:1rem 0 .5rem">Dead Letter Queue</h3>
+  <pre id="qstash-dlq" class="mono"></pre>
+</div>
+<div id="panel-snapshots" class="panel">
+  <div class="toolbar">
+    <input id="snap-name" placeholder="Snapshot name">
+    <input id="snap-pattern" placeholder="Pattern" value="*">
+    <button onclick="saveSnapshot()">Save</button>
+    <button onclick="listSnapshots()">List</button>
+  </div>
+  <pre id="snapshots" class="mono"></pre>
+</div>
+<div id="panel-cli" class="panel">
+  <div class="toolbar">
+    <input id="cmd" placeholder="Command e.g. GET" style="width:120px">
+    <input id="cmd-args" placeholder="Args space-separated" style="min-width:240px">
+    <button onclick="runCommand()">Run</button>
+  </div>
+  <pre id="cmd-out" class="mono"></pre>
+</div>
 <script>
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('panel-'+name).classList.add('active');
+}
 function getToken() {
   const el = document.getElementById('token');
   const token = el.value.trim();
   if (token) sessionStorage.setItem('upstash_local_token', token);
   return token || sessionStorage.getItem('upstash_local_token') || '';
 }
-function authHeaders() {
-  const token = getToken();
-  return token ? { 'Authorization': 'Bearer ' + token } : {};
+function authHeaders(json) {
+  const h = { 'Authorization': 'Bearer ' + getToken() };
+  if (json) h['Content-Type'] = 'application/json';
+  return h;
 }
 async function loadStats() {
   const r = await fetch('/dashboard/api/stats', { headers: authHeaders() });
   if (r.status === 401) {
-    document.getElementById('stats').innerHTML = '<div class="card"><h3>Auth required</h3><div class="val" style="font-size:1rem">Enter your API token below</div></div>';
+    document.getElementById('stats').innerHTML = '<div class="card"><h3>Auth required</h3><div class="val" style="font-size:1rem">Enter your API token</div></div>';
     return;
   }
   const d = await r.json();
   document.getElementById('stats').innerHTML =
     '<div class="card"><h3>Total Requests</h3><div class="val">'+(d.total_requests||0)+'</div></div>'+
-    '<div class="card"><h3>Cloud Quota Saved</h3><div class="val green">'+(d.quota_saved||0)+'</div></div>'+
-    '<div class="card"><h3>Free Tier Limit</h3><div class="val">'+(d.free_tier_quota||10000)+'/day</div></div>'+
+    '<div class="card"><h3>Today</h3><div class="val green">'+(d.requests_today||0)+'</div></div>'+
+    '<div class="card"><h3>Quota Saved</h3><div class="val green">'+(d.quota_saved||0)+'</div></div>'+
     '<div class="card"><h3>Uptime</h3><div class="val" style="font-size:1.2rem">'+(d.uptime_seconds||0)+'s</div></div>';
 }
 async function loadKeys() {
@@ -244,11 +323,41 @@ async function loadKeys() {
   if (d.error) { tbody.innerHTML = '<tr><td colspan="4">'+d.error+'</td></tr>'; return; }
   tbody.innerHTML = (d.keys||[]).map(k => '<tr><td>'+k.key+'</td><td><span class="badge">'+k.type+'</span></td><td>'+(k.ttl<0?'∞':k.ttl+'s')+'</td><td>'+JSON.stringify(k.value).slice(0,80)+'</td></tr>').join('');
 }
+async function loadMonitor() {
+  const r = await fetch('/dashboard/api/monitor?limit=50', { headers: authHeaders() });
+  const d = await r.json();
+  document.getElementById('monitor').textContent = (d.entries||[]).map(e => new Date(e.time).toISOString().slice(11,19)+' '+e.command+' '+e.args).join('\n') || '(no commands yet)';
+}
+async function loadQStash() {
+  const r = await fetch('/v2/messages', { headers: authHeaders() });
+  document.getElementById('qstash-msgs').textContent = JSON.stringify(await r.json(), null, 2);
+}
+async function loadDLQ() {
+  const r = await fetch('/v2/dlq', { headers: authHeaders() });
+  document.getElementById('qstash-dlq').textContent = JSON.stringify(await r.json(), null, 2);
+}
+async function listSnapshots() {
+  const r = await fetch('/dashboard/api/snapshots', { headers: authHeaders() });
+  document.getElementById('snapshots').textContent = JSON.stringify(await r.json(), null, 2);
+}
+async function saveSnapshot() {
+  const name = document.getElementById('snap-name').value.trim();
+  const pattern = document.getElementById('snap-pattern').value || '*';
+  if (!name) return;
+  const r = await fetch('/dashboard/api/snapshots/'+encodeURIComponent(name)+'?pattern='+encodeURIComponent(pattern), { method: 'POST', headers: authHeaders() });
+  document.getElementById('snapshots').textContent = JSON.stringify(await r.json(), null, 2);
+}
+async function runCommand() {
+  const cmd = document.getElementById('cmd').value.trim();
+  const args = document.getElementById('cmd-args').value.trim().split(/\s+/).filter(Boolean);
+  const r = await fetch('/dashboard/api/execute', { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ command: cmd, args }) });
+  document.getElementById('cmd-out').textContent = JSON.stringify(await r.json(), null, 2);
+}
 (function(){
   const saved = sessionStorage.getItem('upstash_local_token');
   if (saved) document.getElementById('token').value = saved;
 })();
-loadStats(); setInterval(loadStats, 5000);
+loadStats(); setInterval(loadStats, 5000); setInterval(loadMonitor, 3000);
 </script>
 </body>
 </html>`
