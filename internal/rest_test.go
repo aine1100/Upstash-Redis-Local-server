@@ -45,6 +45,8 @@ func startTestServerOpts(t *testing.T, configure func(*internal.Server)) (*inter
 	port := 18080 + testPortCounter.Add(1)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	logger, _ := zap.NewDevelopment()
+	commandACL := internal.NewCommandACL()
+	commandACL.LoadFromRedis(pool, logger)
 	server := &internal.Server{
 		Address:       addr,
 		APIToken:      "test-token",
@@ -53,6 +55,8 @@ func startTestServerOpts(t *testing.T, configure func(*internal.Server)) (*inter
 		Logger:        logger,
 		Metrics:       internal.NewMetrics(),
 		Security:      internal.SecurityConfig{RequireDashboardAuth: true},
+		CommandLog:    internal.NewCommandLog(50),
+		CommandACL:    commandACL,
 		Dial: func() (redis.Conn, error) {
 			return redis.Dial("tcp", mr.Addr())
 		},
@@ -543,6 +547,156 @@ func TestRecorder(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "SET") || !strings.Contains(lines[1], "GET") {
 		t.Fatalf("recorded commands unexpected: %v", lines)
+	}
+}
+
+func TestSnapshotSaveRestore(t *testing.T) {
+	_, mr, base := startTestServer(t)
+	defer mr.Close()
+
+	setReq, _ := http.NewRequest("GET", base+"/SET/snap:a/1", nil)
+	setReq.Header.Set("Authorization", "Bearer test-token")
+	http.DefaultClient.Do(setReq)
+
+	saveReq, _ := http.NewRequest("POST", base+"/dashboard/api/snapshots/users-test?pattern=snap:*", nil)
+	saveReq.Header.Set("Authorization", "Bearer test-token")
+	saveResp, err := http.DefaultClient.Do(saveReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveResp.Body.Close()
+
+	delReq, _ := http.NewRequest("GET", base+"/DEL/snap:a", nil)
+	delReq.Header.Set("Authorization", "Bearer test-token")
+	http.DefaultClient.Do(delReq)
+
+	restoreReq, _ := http.NewRequest("POST", base+"/dashboard/api/snapshots/users-test/restore", nil)
+	restoreReq.Header.Set("Authorization", "Bearer test-token")
+	restoreResp, err := http.DefaultClient.Do(restoreReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restoreResp.Body.Close()
+	if restoreResp.StatusCode != http.StatusOK {
+		t.Fatalf("restore failed: %d", restoreResp.StatusCode)
+	}
+
+	getReq, _ := http.NewRequest("GET", base+"/GET/snap:a", nil)
+	getReq.Header.Set("Authorization", "Bearer test-token")
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer getResp.Body.Close()
+	body, _ := io.ReadAll(getResp.Body)
+	if !strings.Contains(string(body), "1") {
+		t.Fatalf("expected restored value, got %s", body)
+	}
+}
+
+func TestCommandLogMonitor(t *testing.T) {
+	_, mr, base := startTestServer(t)
+	defer mr.Close()
+
+	ping, _ := http.NewRequest("GET", base+"/PING", nil)
+	ping.Header.Set("Authorization", "Bearer test-token")
+	http.DefaultClient.Do(ping)
+
+	req, _ := http.NewRequest("GET", base+"/dashboard/api/monitor", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]interface{}
+	json.Unmarshal(readBody(t, resp), &out)
+	if out["count"].(float64) < 1 {
+		t.Fatalf("expected command log entries, got %v", out)
+	}
+}
+
+func TestQStashGetMessageAndReplay(t *testing.T) {
+	dest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer dest.Close()
+
+	srv, mr, base := startTestServerOpts(t, func(s *internal.Server) {
+		q := internal.NewQStash(s.RedisPool, s.Logger)
+		q.SetPollInterval(30 * time.Millisecond)
+		s.QStash = q
+	})
+	defer mr.Close()
+	srv.QStash.Start()
+	defer srv.QStash.Stop()
+
+	pubURL := base + "/v2/publish/?url=" + url.QueryEscape(dest.URL)
+	pub, _ := http.NewRequest("POST", pubURL, strings.NewReader("x"))
+	pub.Header.Set("Authorization", "Bearer test-token")
+	pub.Header.Set("Upstash-Retries", "0")
+	http.DefaultClient.Do(pub)
+
+	time.Sleep(500 * time.Millisecond)
+
+	listReq, _ := http.NewRequest("GET", base+"/v2/messages", nil)
+	listReq.Header.Set("Authorization", "Bearer test-token")
+	listResp, _ := http.DefaultClient.Do(listReq)
+	var listed map[string]interface{}
+	json.Unmarshal(readBody(t, listResp), &listed)
+	listResp.Body.Close()
+	msgs := listed["messages"].([]interface{})
+	if len(msgs) == 0 {
+		t.Fatal("expected at least one message")
+	}
+	msgID := msgs[0].(map[string]interface{})["messageId"].(string)
+
+	getReq, _ := http.NewRequest("GET", base+"/v2/messages/"+msgID, nil)
+	getReq.Header.Set("Authorization", "Bearer test-token")
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("get message expected 200, got %d", getResp.StatusCode)
+	}
+
+	dlqReq, _ := http.NewRequest("GET", base+"/v2/dlq", nil)
+	dlqReq.Header.Set("Authorization", "Bearer test-token")
+	dlqResp, _ := http.DefaultClient.Do(dlqReq)
+	var dlq map[string]interface{}
+	json.Unmarshal(readBody(t, dlqResp), &dlq)
+	dlqResp.Body.Close()
+	if dlq["count"].(float64) < 1 {
+		t.Fatal("expected message in DLQ before replay")
+	}
+
+	replayReq, _ := http.NewRequest("POST", base+"/v2/dlq/"+msgID+"/replay", nil)
+	replayReq.Header.Set("Authorization", "Bearer test-token")
+	replayResp, err := http.DefaultClient.Do(replayReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replayResp.Body.Close()
+	if replayResp.StatusCode != http.StatusOK {
+		t.Fatalf("dlq replay expected 200, got %d", replayResp.StatusCode)
+	}
+}
+
+func TestCommandACLBlocksHSET(t *testing.T) {
+	_, mr, base := startTestServer(t)
+	defer mr.Close()
+
+	req, _ := http.NewRequest("GET", base+"/HSET/myhash/f/v", nil)
+	req.Header.Set("Authorization", "Bearer readonly-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected HSET blocked for readonly, got %d", resp.StatusCode)
 	}
 }
 

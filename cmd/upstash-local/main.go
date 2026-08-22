@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,6 +76,22 @@ func main() {
 		token := fs.String("token", localToken, "API token")
 		fs.Parse(os.Args[2:])
 		replay(*url, *token, *input)
+	case "snapshot":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: upstash-local snapshot save|restore|list|delete")
+			os.Exit(1)
+		}
+		snapshotCmd(os.Args[2:])
+	case "pull":
+		fs := flag.NewFlagSet("pull", flag.ExitOnError)
+		cloudURL := fs.String("from", "", "Cloud Upstash REST URL (required)")
+		cloudToken := fs.String("cloud-token", "", "Cloud REST token (required)")
+		targetURL := fs.String("to", localURL, "Local REST URL")
+		targetToken := fs.String("token", localToken, "Local API token")
+		pattern := fs.String("pattern", "*", "Key pattern")
+		mask := fs.Bool("mask-secrets", true, "Redact values matching secret/password/token")
+		fs.Parse(os.Args[2:])
+		pull(*cloudURL, *cloudToken, *targetURL, *targetToken, *pattern, *mask)
 	default:
 		printUsage()
 		os.Exit(1)
@@ -93,7 +110,9 @@ Commands:
   import           Import keys from JSON (--input dump.json)
   ping [url]       Test REST connection
   generate-token   Generate random local API tokens
-  replay           Replay a recorded session (--input session.jsonl)`)
+  replay           Replay a recorded session (--input session.jsonl)
+  snapshot         Named snapshots (save|restore|list|delete)
+  pull             Pull keys from Upstash Cloud to local (--from URL --cloud-token TOKEN)`)
 }
 
 func replay(url, token, input string) {
@@ -124,6 +143,190 @@ func replay(url, token, input string) {
 		ok++
 	}
 	fmt.Printf("✅ Replayed %d commands (%d ok, %d failed) from %s\n", ok+failed, ok, failed, input)
+}
+
+func snapshotCmd(args []string) {
+	fs := flag.NewFlagSet("snapshot", flag.ExitOnError)
+	name := fs.String("name", "", "Snapshot name")
+	pattern := fs.String("pattern", "*", "Key pattern for save")
+	url := fs.String("url", localURL, "REST URL")
+	token := fs.String("token", localToken, "API token")
+	fs.Parse(args[1:])
+
+	sub := args[0]
+	auth := restHeaders(*token)
+	switch sub {
+	case "list":
+		req, _ := http.NewRequest("GET", *url+"/dashboard/api/snapshots", nil)
+		for k, v := range auth {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		fmt.Println(strings.TrimSpace(string(body)))
+	case "save":
+		if *name == "" {
+			fmt.Println("--name required")
+			os.Exit(1)
+		}
+		req, _ := http.NewRequest("POST", *url+"/dashboard/api/snapshots/"+*name+"?pattern="+urlQuery(*pattern), nil)
+		for k, v := range auth {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		fmt.Printf("✅ Saved snapshot: %s\n", strings.TrimSpace(string(body)))
+	case "restore":
+		if *name == "" {
+			fmt.Println("--name required")
+			os.Exit(1)
+		}
+		req, _ := http.NewRequest("POST", *url+"/dashboard/api/snapshots/"+*name+"/restore", nil)
+		for k, v := range auth {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		fmt.Printf("✅ Restored snapshot: %s\n", strings.TrimSpace(string(body)))
+	case "delete":
+		if *name == "" {
+			fmt.Println("--name required")
+			os.Exit(1)
+		}
+		req, _ := http.NewRequest("DELETE", *url+"/dashboard/api/snapshots/"+*name, nil)
+		for k, v := range auth {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		fmt.Printf("✅ Deleted snapshot: %s\n", strings.TrimSpace(string(body)))
+	default:
+		fmt.Println("Usage: upstash-local snapshot save|restore|list|delete --name NAME")
+		os.Exit(1)
+	}
+}
+
+func pull(cloudURL, cloudToken, targetURL, targetToken, pattern string, maskSecrets bool) {
+	if cloudURL == "" || cloudToken == "" {
+		fmt.Println("--from and --cloud-token are required")
+		os.Exit(1)
+	}
+	cloudURL = strings.TrimRight(cloudURL, "/")
+	targetURL = strings.TrimRight(targetURL, "/")
+
+	keys, err := scanCloudKeys(cloudURL, cloudToken, pattern)
+	if err != nil {
+		fmt.Printf("Error scanning cloud: %v\n", err)
+		os.Exit(1)
+	}
+
+	var cmds [][]interface{}
+	for _, key := range keys {
+		val, err := cloudGet(cloudURL, cloudToken, key)
+		if err != nil {
+			continue
+		}
+		if maskSecrets && shouldMaskKey(key) {
+			val = "[REDACTED]"
+		}
+		cmds = append(cmds, []interface{}{"SET", key, val})
+	}
+	if len(cmds) == 0 {
+		fmt.Println("No keys pulled")
+		return
+	}
+	data, code, err := restPost(targetURL+"/pipeline", targetToken, cmds)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✅ Pulled %d keys to local (HTTP %d): %s\n", len(cmds), code, strings.TrimSpace(string(data)))
+}
+
+func scanCloudKeys(base, token, pattern string) ([]string, error) {
+	var keys []string
+	cursor := "0"
+	for {
+		req, _ := http.NewRequest("GET", base+"/SCAN/"+cursor+"/MATCH/"+pattern, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var out struct {
+			Result []interface{} `json:"result"`
+		}
+		json.Unmarshal(body, &out)
+		if len(out.Result) < 2 {
+			break
+		}
+		cursor = fmt.Sprint(out.Result[0])
+		if batch, ok := out.Result[1].([]interface{}); ok {
+			for _, k := range batch {
+				keys = append(keys, fmt.Sprint(k))
+			}
+		}
+		if cursor == "0" {
+			break
+		}
+	}
+	return keys, nil
+}
+
+func cloudGet(base, token, key string) (string, error) {
+	req, _ := http.NewRequest("GET", base+"/GET/"+key, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var out struct {
+		Result string `json:"result"`
+	}
+	json.Unmarshal(body, &out)
+	return out.Result, nil
+}
+
+func shouldMaskKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, s := range []string{"password", "secret", "token", "apikey", "api_key", "credential"} {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func restHeaders(token string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + token}
+}
+
+func urlQuery(s string) string {
+	return url.QueryEscape(s)
 }
 
 func useProfile(name string) {

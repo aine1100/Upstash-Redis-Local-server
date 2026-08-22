@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: upstash-redis-local
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Point at Render Redis, Upstash Redis, or any TCP Redis (host:port)
+      - key: REDIS_ADDR
+        sync: false
+      - key: UPSTASH_TOKEN
+        generateValue: true
+      - key: UPSTASH_READONLY_TOKEN
+        generateValue: true
+      - key: UPSTASH_REQUIRE_DASHBOARD_AUTH
+        value: "true"
+      - key: UPSTASH_SECURE
+        value: "true"

@@ -23,6 +23,9 @@ type Server struct {
 	LogRequests   bool
 	Recorder      *Recorder
 	QStash        *QStash
+	CommandLog    *CommandLog
+	CommandACL    *CommandACL
+	SigningKey    string
 
 	// Dial creates a standalone connection for long-lived streams (pub/sub,
 	// monitor) so they never exhaust the shared request pool. Falls back to

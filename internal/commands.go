@@ -30,6 +30,9 @@ func (s *Server) executeCommand(auth *authResult, commandName string, args ...in
 	if s.Recorder != nil {
 		s.Recorder.Record(commandName, args)
 	}
+	if s.CommandLog != nil {
+		s.CommandLog.Record(commandName, args)
+	}
 
 	conn := s.RedisPool.Get()
 	defer conn.Close()

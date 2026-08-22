@@ -1,0 +1,59 @@
+name: Upstash Redis Local
+description: Start a local Upstash-compatible Redis REST API for CI tests
+branding:
+  icon: database
+  color: blue
+
+inputs:
+  token:
+    description: API token for the local server
+    required: false
+    default: ci-test-token
+  port:
+    description: Host port to bind
+    required: false
+    default: "8000"
+  enable-qstash:
+    description: Enable QStash emulator
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Start Redis
+      shell: bash
+      run: |
+        docker run -d --name upstash-ci-redis -p 6379:6379 redis:7-alpine
+        for i in $(seq 1 30); do
+          docker exec upstash-ci-redis redis-cli ping && break
+          sleep 1
+        done
+
+    - name: Build and start upstash-redis-local
+      shell: bash
+      run: |
+        go build -o /tmp/upstash-redis-local .
+        EXTRA=""
+        if [ "${{ inputs.enable-qstash }}" = "true" ]; then
+          EXTRA="--enable-qstash"
+        fi
+        /tmp/upstash-redis-local \
+          --redis localhost:6379 \
+          --token "${{ inputs.token }}" \
+          --addr ":${{ inputs.port }}" \
+          $EXTRA &
+        echo "UPSTASH_REDIS_REST_URL=http://localhost:${{ inputs.port }}" >> "$GITHUB_ENV"
+        echo "UPSTASH_REDIS_REST_TOKEN=${{ inputs.token }}" >> "$GITHUB_ENV"
+        for i in $(seq 1 30); do
+          curl -sf "http://localhost:${{ inputs.port }}/health" && exit 0
+          sleep 1
+        done
+        echo "Server failed to start" >&2
+        exit 1
+
+    - name: Print connection info
+      shell: bash
+      run: |
+        echo "Upstash Redis Local ready at http://localhost:${{ inputs.port }}"
+        echo "Token: ${{ inputs.token }}"

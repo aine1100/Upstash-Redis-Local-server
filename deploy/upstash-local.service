@@ -1,0 +1,26 @@
+[Unit]
+Description=Upstash Redis Local REST proxy
+After=network-online.target redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=upstash
+Group=upstash
+Environment=REDIS_ADDR=127.0.0.1:6379
+Environment=UPSTASH_ADDR=:8000
+Environment=UPSTASH_TOKEN=change-me
+Environment=UPSTASH_REQUIRE_DASHBOARD_AUTH=true
+Environment=UPSTASH_SECURE=true
+ExecStart=/usr/local/bin/upstash-redis-local
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/upstash-redis-local
+
+[Install]
+WantedBy=multi-user.target
